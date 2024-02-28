@@ -1,0 +1,137 @@
+# Maven
+# Build your Java project and run tests with Apache Maven.
+# Add steps that analyze code, save build artifacts, deploy, and more:
+# https://docs.microsoft.com/azure/devops/pipelines/languages/java
+
+trigger:
+- main
+
+variables:
+  buildConfiguration: 'Release'
+  MAVEN_CACHE_FOLDER: $(Pipeline.Workspace)/.m2/repository
+  MAVEN_OPTS: '-Dmaven.repo.local=$(MAVEN_CACHE_FOLDER)'  
+
+  # Container registry service connection established during pipeline creation
+  dockerRegistryServiceConnection: 'f8756368-902e-441e-95a8-1187615afae8'
+  imageRepository: 'billingback'
+  containerRegistry: 'conteinerbilling.azurecr.io'
+  dockerfilePath: '**/Dockerfile'
+  buildTag: '$(Build.BuildId)'
+  latestTag: 'latest'
+
+stages:
+- stage: 'build'
+  displayName: 'Build the applicacion' 
+  jobs:
+   - job: 'build'
+     pool:
+       vmImage: ubuntu-latest
+       
+     steps: 
+
+     - checkout: self
+       fetchDepth: 0
+
+     - task: Cache@2
+       inputs:      
+         key: 'maven | "$(Agent.OS)" | **/pom.xml'
+         restoreKeys: |
+           maven | "$(Agent.OS)"
+           maven
+         path: $(MAVEN_CACHE_FOLDER)
+       displayName: Cache Maven local repo
+
+     - task: Maven@3
+       inputs:
+         mavenPomFile: 'pom.xml'
+         mavenOptions: '-Xmx3072m'
+         javaHomeOption: 'JDKVersion'
+         jdkVersionOption: '1.11'
+         jdkArchitectureOption: 'x64'
+         publishJUnitResults: true
+         testResultsFiles: '**/surefire-reports/TEST-*.xml'
+         mavenAuthenticateFeed: true
+         goals: 'package'
+         options: '-X -P azure_artifacts $(MAVEN_OPTS)'
+
+
+     - task: CopyFiles@1
+       displayName: 'Coppy jar to pipeline artifact'
+       inputs:
+         SourceFolder: '$(System.DefaultWorkingDirectory)/target/'
+         Contents: '*.jar'
+         TargetFolder: '$(build.artifactstagingdirectory)/$(buildConfiguration)'
+         CleanTargetFolder: true
+
+     - task: ArchiveFiles@2
+       inputs:
+        rootFolderOrFile: '$(System.DefaultWorkingDirectory)/target/' 
+        includeRootFolder: true 
+        archiveType: 'zip' # Options: zip, 7z, tar, wim
+        tarCompression: 'gz' # Optional. Options: gz, bz2, xz, none
+        archiveFile: '$(build.artifactstagingdirectory)/$(Build.BuildId).zip' 
+        replaceExistingArchive: true 
+        verbose: # Optional
+
+     - task: PublishBuildArtifacts@1
+       displayName: 'Publish Artifact: released_package'
+       condition: succeeded()
+
+     - task: Docker@2
+       displayName: Build and push an image to container registry
+       inputs:
+         containerRegistry: '$(dockerRegistryServiceConnection)'
+         repository: '$(imageRepository)'
+         command: 'buildAndPush'
+         Dockerfile: '$(dockerfilePath)'
+         buildContext: '$(System.DefaultWorkingDirectory)/'
+         tags: |
+           $(buildTag)
+           $(latestTag)
+
+     - task: PublishBuildArtifacts@1
+       displayName: 'Publish Artifact: released_package'
+       condition: succeeded()
+
+   - job: 'tag_build'
+     dependsOn: build
+     condition: succeeded()
+     pool:
+      vmImage: ubuntu-latest
+ 
+     steps:
+        #Enable gitcommands using this account
+      - checkout: self
+        fetchDepth: 0
+        persistCredentials: true
+      
+      #Config gitversion 5.x.x
+      - task: gitversion/setup@0
+        displayName: 'Setup git version'
+        inputs:
+          versionSpec: '5.x.x' 
+        #calculate the version of source code
+      - task: gitversion/execute@0
+        displayName: 'Calculate SemVer'
+        
+        #Print in console current version
+      - script: echo current version is $(GitVersion.SemVer)
+        displayName: 'Display calculated version'  
+       
+        #setting git user
+      - task: CmdLine@2
+        displayName: Init git global config
+        inputs:
+          script: |
+              git config --global user.email "EMAIL-OF-PIPELINE-USER"
+              git config --global user.name "Pipeline"  
+      #create tag after build job finish
+      - task: CmdLine@2
+        displayName: Create git tag for current version 
+        inputs:
+          script: |
+            git tag -a $(GitVersion.SemVer) -m "Creating tag with new $(GitVersion.SemVer)"
+            git push origin $(GitVersion.SemVer)
+
+
+
